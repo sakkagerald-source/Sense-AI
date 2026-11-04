@@ -1,3 +1,4 @@
+```kotlin
 package com.senseassistant.app
 
 import android.app.Activity
@@ -122,6 +123,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         loadReminders()
     }
 
+    override fun onResume() {
+        super.onResume()
+
+        if (::reminderList.isInitialized) {
+            loadReminders()
+        }
+    }
+
     private fun addButton(
         parent: LinearLayout,
         label: String,
@@ -140,11 +149,21 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         )
     }
 
+    // ==========================================
+    // PEMROSESAN PERINTAH SENSE
+    // ==========================================
+
     private fun handleCommand(command: String) {
+
         val text = command.trim()
 
         if (text.isEmpty()) {
             speak("Silakan ketik perintah Anda.")
+            return
+        }
+
+        // Periksa perintah membuat pengingat otomatis
+        if (createQuickReminder(text)) {
             return
         }
 
@@ -164,6 +183,61 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         status.text = reply
         speak(reply)
     }
+
+    // ==========================================
+    // PENGINGAT OTOMATIS MELALUI SUARA ATAU TEKS
+    // ==========================================
+
+    private fun createQuickReminder(command: String): Boolean {
+
+        val pattern = Regex(
+            """ingatkan\s+saya\s+(\d+)\s+(detik|menit|jam|hari)\s+lagi\s+(?:untuk\s+)?(.+)""",
+            RegexOption.IGNORE_CASE
+        )
+
+        val match = pattern.find(command) ?: return false
+
+        val amount = match.groupValues[1].toLongOrNull()
+            ?: return false
+
+        val unit = match.groupValues[2].lowercase(Locale.ROOT)
+        val message = match.groupValues[3].trim()
+
+        if (amount <= 0 || message.isEmpty()) {
+            status.text = "Perintah pengingat tidak valid."
+            speak("Mohon periksa kembali perintah pengingat.")
+            return true
+        }
+
+        val multiplier = when (unit) {
+            "detik" -> 1_000L
+            "menit" -> 60_000L
+            "jam" -> 3_600_000L
+            "hari" -> 86_400_000L
+            else -> return false
+        }
+
+        if (amount > Long.MAX_VALUE / multiplier) {
+            status.text = "Durasi pengingat terlalu panjang."
+            speak("Durasi pengingat terlalu panjang.")
+            return true
+        }
+
+        val reminder = Reminder(
+            id = System.currentTimeMillis(),
+            message = message,
+            timeMillis = System.currentTimeMillis() +
+                (amount * multiplier)
+        )
+
+        saveAndSchedule(reminder)
+
+        return true
+    }
+
+    // ==========================================
+    // MEMBUAT PENGINGAT MANUAL
+    // ==========================================
 
     private fun createReminder() {
 
@@ -247,8 +321,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         ).show()
     }
 
+    // ==========================================
+    // MENYIMPAN DAN MENJADWALKAN ALARM
+    // ==========================================
+
     private fun saveAndSchedule(reminder: Reminder) {
 
+        // Simpan pengingat secara permanen
         ReminderStore.save(this, reminder)
 
         val alarmManager = getSystemService(
@@ -277,6 +356,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 !alarmManager.canScheduleExactAlarms()
             ) {
 
+                // Gunakan alarm biasa jika izin alarm tepat waktu belum aktif
                 alarmManager.setAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     reminder.timeMillis,
@@ -292,7 +372,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 )
             }
 
-            status.text = "Pengingat berhasil dijadwalkan."
+            status.text = "Pengingat berhasil disimpan: ${reminder.message}"
 
             speak("Pengingat berhasil disimpan.")
 
@@ -302,12 +382,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 !alarmManager.canScheduleExactAlarms()
             ) {
+
                 AlertDialog.Builder(this)
                     .setTitle("Aktifkan alarm tepat waktu")
                     .setMessage(
-                        "SENSE sudah menyimpan pengingat. " +
-                        "Untuk meningkatkan ketepatan waktu notifikasi, " +
-                        "aktifkan izin alarm di pengaturan."
+                        "Pengingat sudah disimpan. " +
+                        "Aktifkan izin alarm agar notifikasi lebih tepat waktu."
                     )
                     .setPositiveButton("Buka Pengaturan") { _, _ ->
                         requestExactAlarmPermission()
@@ -318,10 +398,33 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         } catch (_: SecurityException) {
 
-            status.text = "Izin alarm belum tersedia."
-            speak("Silakan periksa izin alarm SENSE.")
+            // Coba jadwalkan alarm biasa jika alarm tepat waktu ditolak
+            try {
+
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    reminder.timeMillis,
+                    pendingIntent
+                )
+
+                status.text = "Pengingat disimpan dengan alarm biasa."
+                speak("Pengingat disimpan.")
+
+                loadReminders()
+
+            } catch (_: Exception) {
+
+                status.text =
+                    "Pengingat tersimpan, tetapi alarm gagal dijadwalkan."
+
+                speak("Pengingat tersimpan, tetapi alarm gagal dijadwalkan.")
+            }
         }
     }
+
+    // ==========================================
+    // IZIN ALARM TEPAT WAKTU
+    // ==========================================
 
     private fun requestExactAlarmPermission() {
 
@@ -334,6 +437,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             if (!alarmManager.canScheduleExactAlarms()) {
 
                 try {
+
                     val intent = Intent(
                         Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
                         Uri.parse("package:$packageName")
@@ -342,15 +446,26 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     startActivity(intent)
 
                 } catch (_: Exception) {
-                    status.text = "Buka pengaturan izin alarm secara manual."
+
+                    status.text =
+                        "Buka pengaturan izin alarm secara manual."
                 }
 
             } else {
+
                 status.text = "Izin alarm tepat waktu sudah aktif."
                 speak("Izin alarm sudah aktif.")
             }
+
+        } else {
+
+            status.text = "Izin alarm tepat waktu tidak diperlukan."
         }
     }
+
+    // ==========================================
+    // MENAMPILKAN DAFTAR PENGINGAT
+    // ==========================================
 
     private fun loadReminders() {
 
@@ -399,13 +514,20 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ==========================================
+    // MENGHAPUS PENGINGAT
+    // ==========================================
+
     private fun deleteReminder(reminder: Reminder) {
 
         val alarmManager = getSystemService(
             Context.ALARM_SERVICE
         ) as AlarmManager
 
-        val intent = Intent(this, ReminderReceiver::class.java)
+        val intent = Intent(
+            this,
+            ReminderReceiver::class.java
+        )
 
         val pendingIntent = PendingIntent.getBroadcast(
             this,
@@ -426,13 +548,20 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         speak("Pengingat berhasil dihapus.")
     }
 
+    // ==========================================
+    // MEMBACA AGENDA
+    // ==========================================
+
     private fun getAgendaText(): String {
 
         val all = ReminderStore.getAll(this)
 
         return if (all.isEmpty()) {
+
             "Belum ada pengingat tersimpan."
+
         } else {
+
             all.sortedBy { it.timeMillis }.joinToString(". ") {
                 it.message
             }
@@ -447,11 +576,16 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         speak(message)
     }
 
+    // ==========================================
+    // PENGENALAN SUARA BAHASA INDONESIA
+    // ==========================================
+
     private fun startVoiceInput() {
 
         val intent = Intent(
             RecognizerIntent.ACTION_RECOGNIZE_SPEECH
         ).apply {
+
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
@@ -469,8 +603,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         try {
+
             startActivityForResult(intent, 101)
+
         } catch (_: Exception) {
+
             speak("Pengenalan suara tidak tersedia.")
         }
     }
@@ -481,6 +618,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         resultCode: Int,
         data: Intent?
     ) {
+
         super.onActivityResult(requestCode, resultCode, data)
 
         if (requestCode == 101 && resultCode == RESULT_OK) {
@@ -492,13 +630,19 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             val command = words?.firstOrNull().orEmpty()
 
             input.setText(command)
+
             handleCommand(command)
         }
     }
 
+    // ==========================================
+    // TEXT TO SPEECH
+    // ==========================================
+
     private fun speak(message: String) {
 
         if (::tts.isInitialized) {
+
             tts.speak(
                 message,
                 TextToSpeech.QUEUE_FLUSH,
@@ -520,6 +664,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 result == TextToSpeech.LANG_MISSING_DATA ||
                 result == TextToSpeech.LANG_NOT_SUPPORTED
             ) {
+
                 tts.language = Locale.US
             }
         }
@@ -534,3 +679,4 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         super.onDestroy()
     }
 }
+```
