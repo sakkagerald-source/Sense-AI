@@ -1,7 +1,5 @@
-
 package com.senseassistant.app
 
-import android.Manifest
 import android.app.Activity
 import android.app.AlarmManager
 import android.app.AlertDialog
@@ -10,7 +8,6 @@ import android.app.PendingIntent
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -27,6 +24,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var tts: TextToSpeech
     private lateinit var status: TextView
     private lateinit var input: EditText
+    private lateinit var reminderList: LinearLayout
 
     private val reminders = mutableListOf<Reminder>()
 
@@ -35,10 +33,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         tts = TextToSpeech(this, this)
 
-        reminders.addAll(ReminderStore.getAll(this))
-        reminders.sortBy { it.timeMillis }
-
-        requestNotificationPermission()
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                200
+            )
+        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -66,7 +66,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             textSize = 18f
             setTextColor(0xFFFFFFFF.toInt())
             gravity = Gravity.CENTER
-            setPadding(0, 42, 0, 30)
+            setPadding(0, 30, 0, 25)
         }
 
         input = EditText(this).apply {
@@ -97,11 +97,29 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             readAgenda()
         }
 
-        addButton(root, "IZINKAN ALARM TEPAT") {
+        addButton(root, "IZIN ALARM TEPAT WAKTU") {
             requestExactAlarmPermission()
         }
 
-        setContentView(root)
+        val heading = TextView(this).apply {
+            text = "\nDAFTAR PENGINGAT"
+            textSize = 18f
+            setTextColor(0xFF62D9FF.toInt())
+        }
+
+        root.addView(heading)
+
+        reminderList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        root.addView(reminderList)
+
+        val scroll = ScrollView(this)
+        scroll.addView(root)
+        setContentView(scroll)
+
+        loadReminders()
     }
 
     private fun addButton(
@@ -117,7 +135,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         parent.addView(
             button,
             LinearLayout.LayoutParams(-1, -2).apply {
-                topMargin = 12
+                topMargin = 10
             }
         )
     }
@@ -132,71 +150,30 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         val reply = when {
             text.contains("halo", true) ||
-                text.contains("selamat pagi", true) ->
-                "Halo. Saya SENSE, asisten pribadi Anda. Ada yang bisa saya bantu?"
+            text.contains("selamat pagi", true) ->
+                "Halo. Saya SENSE, asisten pribadi Anda."
 
             text.contains("agenda", true) ||
-                text.contains("reminder", true) ->
-                buildAgendaMessage()
+            text.contains("reminder", true) ->
+                getAgendaText()
 
             else ->
-                "Perintah diterima: $text. Fitur percakapan AI online akan ditambahkan pada tahap berikutnya."
+                "Perintah diterima: $text. Fitur AI online akan dikembangkan berikutnya."
         }
 
         status.text = reply
         speak(reply)
     }
 
-    private fun startVoiceInput() {
-        val intent = Intent(
-            RecognizerIntent.ACTION_RECOGNIZE_SPEECH
-        ).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")
-            putExtra(
-                RecognizerIntent.EXTRA_PROMPT,
-                "Silakan berbicara dengan SENSE"
-            )
-        }
-
-        try {
-            startActivityForResult(intent, 101)
-        } catch (_: Exception) {
-            speak("Pengenalan suara tidak tersedia pada perangkat ini.")
-        }
-    }
-
-    @Deprecated("Deprecated by Android, retained for compatibility")
-    override fun onActivityResult(
-        requestCode: Int,
-        resultCode: Int,
-        data: Intent?
-    ) {
-        super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode == 101 && resultCode == RESULT_OK) {
-            val words = data?.getStringArrayListExtra(
-                RecognizerIntent.EXTRA_RESULTS
-            )
-
-            val command = words?.firstOrNull().orEmpty()
-            input.setText(command)
-            handleCommand(command)
-        }
-    }
-
     private fun createReminder() {
+
         val edit = EditText(this).apply {
             hint = "Contoh: Hubungi panitia KKR"
-            setTextColor(0xFF000000.toInt())
         }
 
         AlertDialog.Builder(this)
-            .setTitle("Pengingat baru")
-            .setMessage("Masukkan isi pengingat Anda.")
+            .setTitle("Pengingat Baru")
+            .setMessage("Apa yang ingin Anda ingat?")
             .setView(edit)
             .setNegativeButton("Batal", null)
             .setPositiveButton("Lanjut") { _, _ ->
@@ -208,101 +185,72 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     return@setPositiveButton
                 }
 
-                chooseReminderDate(message)
+                selectReminderDate(message)
             }
             .show()
     }
 
-    private fun chooseReminderDate(message: String) {
-        val now = Calendar.getInstance()
+    private fun selectReminderDate(message: String) {
+
+        val calendar = Calendar.getInstance()
 
         DatePickerDialog(
             this,
             { _, year, month, day ->
 
-                chooseReminderTime(
-                    message,
-                    year,
-                    month,
-                    day
-                )
+                calendar.set(Calendar.YEAR, year)
+                calendar.set(Calendar.MONTH, month)
+                calendar.set(Calendar.DAY_OF_MONTH, day)
+
+                selectReminderTime(message, calendar)
 
             },
-            now.get(Calendar.YEAR),
-            now.get(Calendar.MONTH),
-            now.get(Calendar.DAY_OF_MONTH)
+            calendar.get(Calendar.YEAR),
+            calendar.get(Calendar.MONTH),
+            calendar.get(Calendar.DAY_OF_MONTH)
         ).show()
     }
 
-    private fun chooseReminderTime(
+    private fun selectReminderTime(
         message: String,
-        year: Int,
-        month: Int,
-        day: Int
+        calendar: Calendar
     ) {
-        val now = Calendar.getInstance()
 
         TimePickerDialog(
             this,
             { _, hour, minute ->
 
-                val selectedTime = Calendar.getInstance().apply {
-                    set(Calendar.YEAR, year)
-                    set(Calendar.MONTH, month)
-                    set(Calendar.DAY_OF_MONTH, day)
-                    set(Calendar.HOUR_OF_DAY, hour)
-                    set(Calendar.MINUTE, minute)
-                    set(Calendar.SECOND, 0)
-                    set(Calendar.MILLISECOND, 0)
-                }
+                calendar.set(Calendar.HOUR_OF_DAY, hour)
+                calendar.set(Calendar.MINUTE, minute)
+                calendar.set(Calendar.SECOND, 0)
+                calendar.set(Calendar.MILLISECOND, 0)
 
-                if (selectedTime.timeInMillis <= System.currentTimeMillis()) {
+                val timeMillis = calendar.timeInMillis
+
+                if (timeMillis <= System.currentTimeMillis()) {
                     speak("Waktu pengingat harus berada di masa depan.")
-                    status.text = "Waktu pengingat harus di masa depan."
                     return@TimePickerDialog
                 }
 
-                saveAndScheduleReminder(
-                    message,
-                    selectedTime.timeInMillis
+                val reminder = Reminder(
+                    id = System.currentTimeMillis(),
+                    message = message,
+                    timeMillis = timeMillis
                 )
 
+                saveAndSchedule(reminder)
+
             },
-            now.get(Calendar.HOUR_OF_DAY),
-            now.get(Calendar.MINUTE),
+            calendar.get(Calendar.HOUR_OF_DAY),
+            calendar.get(Calendar.MINUTE),
             true
         ).show()
     }
 
-    private fun saveAndScheduleReminder(
-        message: String,
-        timeMillis: Long
-    ) {
-        val reminder = Reminder(
-            id = System.currentTimeMillis(),
-            message = message,
-            timeMillis = timeMillis
-        )
+    private fun saveAndSchedule(reminder: Reminder) {
 
         ReminderStore.save(this, reminder)
 
-        reminders.removeAll { it.id == reminder.id }
-        reminders.add(reminder)
-        reminders.sortBy { it.timeMillis }
-
-        scheduleAlarm(reminder)
-
-        val dateText = java.text.SimpleDateFormat(
-            "dd/MM/yyyy HH:mm",
-            Locale("id", "ID")
-        ).format(java.util.Date(timeMillis))
-
-        status.text = "Pengingat tersimpan: $message\n$dateText"
-
-        speak("Pengingat berhasil disimpan untuk tanggal $dateText")
-    }
-
-    private fun scheduleAlarm(reminder: Reminder) {
         val alarmManager = getSystemService(
             Context.ALARM_SERVICE
         ) as AlarmManager
@@ -323,20 +271,20 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         )
 
         try {
+
             if (
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 !alarmManager.canScheduleExactAlarms()
             ) {
+
                 alarmManager.setAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     reminder.timeMillis,
                     pendingIntent
                 )
 
-                status.text =
-                    "Pengingat tersimpan. Alarm menggunakan jadwal alternatif. Aktifkan izin alarm tepat untuk ketepatan waktu."
-
             } else {
+
                 alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     reminder.timeMillis,
@@ -344,84 +292,212 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 )
             }
 
+            status.text = "Pengingat berhasil dijadwalkan."
+
+            speak("Pengingat berhasil disimpan.")
+
+            loadReminders()
+
+            if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                !alarmManager.canScheduleExactAlarms()
+            ) {
+                AlertDialog.Builder(this)
+                    .setTitle("Aktifkan alarm tepat waktu")
+                    .setMessage(
+                        "SENSE sudah menyimpan pengingat. " +
+                        "Untuk meningkatkan ketepatan waktu notifikasi, " +
+                        "aktifkan izin alarm di pengaturan."
+                    )
+                    .setPositiveButton("Buka Pengaturan") { _, _ ->
+                        requestExactAlarmPermission()
+                    }
+                    .setNegativeButton("Nanti", null)
+                    .show()
+            }
+
         } catch (_: SecurityException) {
 
-            alarmManager.setAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                reminder.timeMillis,
-                pendingIntent
-            )
-        }
-    }
-
-    private fun readAgenda() {
-        reminders.clear()
-        reminders.addAll(ReminderStore.getAll(this))
-        reminders.sortBy { it.timeMillis }
-
-        val message = buildAgendaMessage()
-
-        status.text = message
-        speak(message)
-    }
-
-    private fun buildAgendaMessage(): String {
-        val activeReminders = ReminderStore.getAll(this)
-            .filter { it.timeMillis > System.currentTimeMillis() }
-            .sortedBy { it.timeMillis }
-
-        if (activeReminders.isEmpty()) {
-            return "Belum ada pengingat mendatang."
-        }
-
-        return "Agenda Anda: " + activeReminders.joinToString(". ") {
-            val date = java.text.SimpleDateFormat(
-                "dd MMMM yyyy, HH:mm",
-                Locale("id", "ID")
-            ).format(java.util.Date(it.timeMillis))
-
-            "${it.message}, pada $date"
-        }
-    }
-
-    private fun requestNotificationPermission() {
-        if (
-            Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(
-                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                202
-            )
+            status.text = "Izin alarm belum tersedia."
+            speak("Silakan periksa izin alarm SENSE.")
         }
     }
 
     private fun requestExactAlarmPermission() {
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+
             val alarmManager = getSystemService(
                 Context.ALARM_SERVICE
             ) as AlarmManager
 
             if (!alarmManager.canScheduleExactAlarms()) {
+
                 try {
                     val intent = Intent(
                         Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
                         Uri.parse("package:$packageName")
                     )
+
                     startActivity(intent)
+
                 } catch (_: Exception) {
-                    speak("Silakan aktifkan izin alarm melalui pengaturan aplikasi.")
+                    status.text = "Buka pengaturan izin alarm secara manual."
                 }
+
             } else {
-                speak("Izin alarm tepat sudah aktif.")
+                status.text = "Izin alarm tepat waktu sudah aktif."
+                speak("Izin alarm sudah aktif.")
             }
+        }
+    }
+
+    private fun loadReminders() {
+
+        reminders.clear()
+        reminders.addAll(ReminderStore.getAll(this))
+
+        reminderList.removeAllViews()
+
+        if (reminders.isEmpty()) {
+
+            val empty = TextView(this).apply {
+                text = "Belum ada pengingat."
+                setTextColor(0xFFFFFFFF.toInt())
+                setPadding(0, 12, 0, 12)
+            }
+
+            reminderList.addView(empty)
+            return
+        }
+
+        reminders.sortedBy { it.timeMillis }.forEach { reminder ->
+
+            val date = java.text.SimpleDateFormat(
+                "dd MMM yyyy, HH:mm",
+                Locale("id", "ID")
+            ).format(reminder.timeMillis)
+
+            val item = TextView(this).apply {
+                text = "• ${reminder.message}\n  $date"
+                textSize = 15f
+                setTextColor(0xFFFFFFFF.toInt())
+                setPadding(8, 14, 8, 14)
+            }
+
+            reminderList.addView(item)
+
+            val deleteButton = Button(this).apply {
+                text = "HAPUS PENGINGAT"
+
+                setOnClickListener {
+                    deleteReminder(reminder)
+                }
+            }
+
+            reminderList.addView(deleteButton)
+        }
+    }
+
+    private fun deleteReminder(reminder: Reminder) {
+
+        val alarmManager = getSystemService(
+            Context.ALARM_SERVICE
+        ) as AlarmManager
+
+        val intent = Intent(this, ReminderReceiver::class.java)
+
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            reminder.id.toInt(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE
+        )
+
+        alarmManager.cancel(pendingIntent)
+        pendingIntent.cancel()
+
+        ReminderStore.remove(this, reminder.id)
+
+        loadReminders()
+
+        status.text = "Pengingat berhasil dihapus."
+        speak("Pengingat berhasil dihapus.")
+    }
+
+    private fun getAgendaText(): String {
+
+        val all = ReminderStore.getAll(this)
+
+        return if (all.isEmpty()) {
+            "Belum ada pengingat tersimpan."
         } else {
-            speak("Perangkat ini mendukung alarm tepat.")
+            all.sortedBy { it.timeMillis }.joinToString(". ") {
+                it.message
+            }
+        }
+    }
+
+    private fun readAgenda() {
+
+        val message = getAgendaText()
+
+        status.text = message
+        speak(message)
+    }
+
+    private fun startVoiceInput() {
+
+        val intent = Intent(
+            RecognizerIntent.ACTION_RECOGNIZE_SPEECH
+        ).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE,
+                "id-ID"
+            )
+
+            putExtra(
+                RecognizerIntent.EXTRA_PROMPT,
+                "Silakan berbicara dengan SENSE"
+            )
+        }
+
+        try {
+            startActivityForResult(intent, 101)
+        } catch (_: Exception) {
+            speak("Pengenalan suara tidak tersedia.")
+        }
+    }
+
+    @Deprecated("Deprecated by Android")
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == 101 && resultCode == RESULT_OK) {
+
+            val words = data?.getStringArrayListExtra(
+                RecognizerIntent.EXTRA_RESULTS
+            )
+
+            val command = words?.firstOrNull().orEmpty()
+
+            input.setText(command)
+            handleCommand(command)
         }
     }
 
     private fun speak(message: String) {
+
         if (::tts.isInitialized) {
             tts.speak(
                 message,
@@ -433,8 +509,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     override fun onInit(statusCode: Int) {
+
         if (statusCode == TextToSpeech.SUCCESS) {
-            val result = tts.setLanguage(Locale("id", "ID"))
+
+            val result = tts.setLanguage(
+                Locale("id", "ID")
+            )
 
             if (
                 result == TextToSpeech.LANG_MISSING_DATA ||
@@ -446,6 +526,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
+
         if (::tts.isInitialized) {
             tts.shutdown()
         }
